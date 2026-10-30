@@ -11,6 +11,10 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
 
 management:
   endpoints:
@@ -25,3 +29,8 @@ app:
   jwt:
     secret: ${JWT_SECRET}
     expiration-minutes: 60
+  chunking:
+    max-chars: 800
+    overlap-chars: 150
+  upload:
+    max-bytes: 10485760
