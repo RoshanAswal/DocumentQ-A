@@ -3,9 +3,13 @@ package com.project.ragqa.service;
 import com.project.ragqa.dto.DocumentResponse;
 import com.project.ragqa.entity.Document;
 import com.project.ragqa.entity.DocumentChunk;
+import com.project.ragqa.entity.DocumentStatus;
 import com.project.ragqa.exception.DocumentProcessingException;
+import com.project.ragqa.exception.DocumentStateException;
 import com.project.ragqa.exception.InvalidFileException;
 import com.project.ragqa.exception.ResourceNotFoundException;
+import com.project.ragqa.exception.ServiceBusyException;
+import com.project.ragqa.ingestion.ChunkIndexer;
 import com.project.ragqa.ingestion.ExtractionResult;
 import com.project.ragqa.ingestion.TextChunk;
 import com.project.ragqa.ingestion.TextChunker;
@@ -14,10 +18,15 @@ import com.project.ragqa.repository.DocumentChunkRepository;
 import com.project.ragqa.repository.DocumentRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
+import com.project.ragqa.ingestion.ChunkIndexer;
+import com.project.ragqa.entity.DocumentStatus;
+import com.project.ragqa.exception.DocumentStateException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 
 @Service
 public class DocumentService {
@@ -39,17 +49,23 @@ public class DocumentService {
     private final TextChunker chunker;
     private final TransactionTemplate transactionTemplate;
     private final long maxBytes;
+    private final ChunkIndexer chunkIndexer;
+    private final ThreadPoolTaskExecutor ingestionExecutor;
 
     public DocumentService(DocumentRepository documentRepository,
                            DocumentChunkRepository chunkRepository,
                            TextExtractor extractor,
                            TextChunker chunker,
+                           ChunkIndexer chunkIndexer,
                            TransactionTemplate transactionTemplate,
+                           @Qualifier("ingestionExecutor") ThreadPoolTaskExecutor ingestionExecutor,
                            @Value("${app.upload.max-bytes}") long maxBytes) {
         this.documentRepository = documentRepository;
         this.chunkRepository = chunkRepository;
         this.extractor = extractor;
         this.chunker = chunker;
+        this.chunkIndexer = chunkIndexer;
+        this.ingestionExecutor = ingestionExecutor;
         this.transactionTemplate = transactionTemplate;
         this.maxBytes = maxBytes;
     }
@@ -74,19 +90,37 @@ public class DocumentService {
                 new Document(ownerId, sanitizeFilename(file.getOriginalFilename()), contentType, content.length));
 
         try {
+            ingestionExecutor.execute(() -> process(doc.getId(), content, contentType));
+        } catch (RejectedExecutionException e) {
+            documentRepository.delete(doc);
+            throw new ServiceBusyException("The server is busy processing other uploads. Please try again shortly.");
+        }
+        return DocumentResponse.from(doc);
+    }
+
+    void process(UUID documentId, byte[] content, String contentType) {
+        long start = System.nanoTime();
+        Document doc = documentRepository.findById(documentId).orElse(null);
+        if (doc == null) {
+            log.warn("Document {} disappeared before processing started", documentId);
+            return;
+        }
+        try {
             doc.markProcessing();
             doc = documentRepository.save(doc);
 
             ExtractionResult extraction = extractor.extract(content, contentType);
             List<TextChunk> chunks = chunker.chunk(extraction.pages());
             doc = storeChunksAndMarkReady(doc, extraction.pageCount(), chunks);
+
+            log.info("Processed document {} in {} ms ({} chunks)",
+                    documentId, (System.nanoTime() - start) / 1_000_000, chunks.size());
         } catch (DocumentProcessingException e) {
-            doc = markFailed(doc, e.getMessage());
+            markFailed(doc, e.getMessage());
         } catch (RuntimeException e) {
-            log.error("Unexpected failure while processing document {}", doc.getId(), e);
-            doc = markFailed(doc, "Unexpected error while processing the document");
+            log.error("Unexpected failure while processing document {}", documentId, e);
+            markFailed(doc, "Unexpected error while processing the document");
         }
-        return DocumentResponse.from(doc);
     }
 
     public List<DocumentResponse> list(UUID ownerId) {
@@ -107,8 +141,9 @@ public class DocumentService {
                 .toList();
 
         return transactionTemplate.execute(status -> {
-            chunkRepository.saveAll(entities);
-            document.markReady(pageCount, entities.size());
+            List<DocumentChunk> saved = chunkRepository.saveAll(entities);
+            chunkIndexer.index(saved, document.getFilename());
+            document.markReady(pageCount, saved.size());
             return documentRepository.save(document);
         });
     }
@@ -155,5 +190,19 @@ public class DocumentService {
             return "unnamed";
         }
         return name.length() > 255 ? name.substring(0, 255) : name;
+    }
+
+    public void delete(UUID id, UUID ownerId) {
+        Document doc = documentRepository.findByIdAndOwnerId(id, ownerId)
+                .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
+
+        if (doc.getStatus() == DocumentStatus.UPLOADED || doc.getStatus() == DocumentStatus.PROCESSING) {
+            throw new DocumentStateException("Document is still being processed. Try again once it has finished.");
+        }
+
+        transactionTemplate.executeWithoutResult(status -> {
+            chunkIndexer.remove(ownerId, id);
+            documentRepository.delete(doc);
+        });
     }
 }

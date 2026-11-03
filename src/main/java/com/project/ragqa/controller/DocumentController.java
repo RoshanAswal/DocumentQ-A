@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,7 +32,7 @@ public class DocumentController {
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<DocumentResponse> upload(@RequestParam("file") MultipartFile file,
                                                    @AuthenticationPrincipal User user) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(documentService.upload(file, user.getId()));
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(documentService.upload(file, user.getId()));
     }
 
     @GetMapping
@@ -42,5 +43,11 @@ public class DocumentController {
     @GetMapping("/{id}")
     public DocumentResponse get(@PathVariable UUID id, @AuthenticationPrincipal User user) {
         return documentService.get(id, user.getId());
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable UUID id, @AuthenticationPrincipal User user) {
+        documentService.delete(id, user.getId());
+        return ResponseEntity.noContent().build();
     }
 }

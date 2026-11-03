@@ -80,4 +80,13 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleTypeMismatch(MethodArgumentTypeMismatchException ex, HttpServletRequest req) {
         return build(HttpStatus.BAD_REQUEST, "Invalid value for parameter '" + ex.getName() + "'", req);
     }
+
+    @ExceptionHandler(ServiceBusyException.class)
+    public ResponseEntity<ApiError> handleBusy(ServiceBusyException ex, HttpServletRequest req) {
+        return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), req);
+    }
+    @ExceptionHandler(DocumentStateException.class)
+    public ResponseEntity<ApiError> handleDocumentState(DocumentStateException ex, HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, ex.getMessage(), req);
+    }
 }
